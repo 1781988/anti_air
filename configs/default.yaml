@@ -1,0 +1,24 @@
+seed: 2026
+
+infrared:
+  sample_fps: 3.0
+  resize_width: 640
+  max_samples: 2000
+  motion_percentile: 99.5
+  min_blob_area: 2
+  max_blob_area_ratio: 0.002
+
+radar:
+  max_numeric_columns: 64
+
+alignment:
+  enabled: true
+  common_rate_hz: 5.0
+  max_lag_seconds: 30.0
+
+model:
+  radar_weight: 0.60
+  infrared_weight: 0.40
+  n_estimators: 400
+  min_samples_leaf: 1
+  class_weight: balanced_subsample
