@@ -6,21 +6,34 @@ import zipfile
 from pathlib import Path
 
 
+# Keep the package self-contained: pyproject.toml declares the four root CLI
+# modules, so all of them must be present for `pip install -e .` to work after
+# the submission archive is unpacked on a clean offline evaluation machine.
 INCLUDE = [
     "anti_air",
     "configs",
     "docs",
+    "scripts",
     "infer.py",
+    "train.py",
+    "evaluate.py",
+    "extract_features.py",
     "requirements.txt",
     "pyproject.toml",
     "run.sh",
     "README.md",
+    "Dockerfile",
+    "Makefile",
 ]
 
 
 def _copy(source: Path, destination: Path) -> None:
     if source.is_dir():
-        shutil.copytree(source, destination, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copytree(
+            source,
+            destination,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
     else:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
@@ -44,12 +57,14 @@ def main() -> None:
     staging.mkdir(parents=True)
     for relative in INCLUDE:
         source = root / relative
-        if source.exists():
-            _copy(source, staging / relative)
+        if not source.exists():
+            raise FileNotFoundError(f"Submission source is missing: {source}")
+        _copy(source, staging / relative)
     _copy(model, staging / "model" / "model.joblib")
     if report.is_file():
         _copy(report, staging / "report" / "test_report.md")
     (staging / "SUBMISSION_README.txt").write_text(
+        "Install: python -m pip install -e .\n"
         "Run: bash run.sh <radar.mat> <infrared.mp4> [result.json]\n"
         "The package is offline and does not read class labels from input filenames.\n",
         encoding="utf-8",
