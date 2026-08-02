@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+.DS_Store
+
+# Competition data and generated artifacts
+data/
+outputs/
+cache/
+*.joblib
+*.pkl
+*.pt
+*.onnx
+*.mp4
+*.mat
