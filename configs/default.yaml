@@ -1,24 +1,54 @@
 seed: 2026
 
+runtime:
+  cache_version: 2
+  n_jobs: -1
+
 infrared:
-  sample_fps: 3.0
-  resize_width: 640
-  max_samples: 2000
-  motion_percentile: 99.5
+  sample_fps: 5.0
+  resize_width: 960
+  max_samples: 5000
+  clahe_clip_limit: 2.0
+  motion_percentile: 99.65
+  contrast_percentile: 99.75
   min_blob_area: 2
-  max_blob_area_ratio: 0.002
+  max_blob_area_ratio: 0.0015
+  max_track_jump_ratio: 0.10
+  max_missed_frames: 5
 
 radar:
-  max_numeric_columns: 64
+  max_numeric_columns: 96
+  max_vector_expansion: 16
+  target_rate_hz: 10.0
+  spectral_bins: 8
 
 alignment:
   enabled: true
   common_rate_hz: 5.0
-  max_lag_seconds: 30.0
+  max_lag_seconds: 45.0
+  estimate_drift: true
+  drift_segments: 5
+  max_drift_ppm: 5000
+
+window:
+  length_seconds: 10.0
+  stride_seconds: 5.0
+  min_coverage_ratio: 0.50
+  max_windows_per_record: 300
 
 model:
-  radar_weight: 0.60
-  infrared_weight: 0.40
-  n_estimators: 400
-  min_samples_leaf: 1
-  class_weight: balanced_subsample
+  estimator: extra_trees
+  n_estimators: 600
+  min_samples_leaf: 2
+  max_features: sqrt
+  class_weight: balanced
+  probability_smoothing: 0.02
+  branch_weights:
+    fusion: 0.55
+    radar: 0.30
+    infrared: 0.15
+
+evaluation:
+  n_splits: 5
+  primary_metric: macro_f1
+  min_valid_folds: 2

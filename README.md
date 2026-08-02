@@ -1,195 +1,262 @@
-# anti_air：复杂环境下雷达—红外目标类型智能识别基线
+# anti_air：复杂环境下雷达—红外目标类型智能识别
 
-本仓库面向“探测识别赛道—科目1：复杂环境下的目标类型智能识别”。赛题关注无人机在超低空、超低速、突防等复杂场景下与鸟、风筝、漂浮物等近地目标难以区分的问题，要求综合利用跟踪目标的信号级、点迹级、航迹级及红外视频信息，构建目标类别识别算法，并提交可运行模型、源代码、算法方案和测试报告。
+本仓库面向“探测识别赛道—科目1：复杂环境下的目标类型智能识别”。任务是在无人机超低空、超低速突防以及鸟、风筝等近地目标干扰条件下，综合利用雷达信号级、点迹级、航迹级信息和红外视频，识别无人机、空飘物及其他非无人机目标。
 
-当前版本提供一套**可运行、可扩展、避免标签泄漏**的雷达—红外双模态基线。它不是最终高分模型，而是用于先打通数据解析、异步对准、特征提取、训练、推理和提交接口的工程骨架。
-
-## 1. 数据结论与建模原则
-
-根据已提供的样例数据：
-
-- 每个批号包含一份雷达 `.mat` 和一份红外 `.mp4`；
-- 文件名格式示例：`radar_339_class-B_16：18.mat`、`ir_339_class-B_16：18.mp4`；
-- 雷达与红外为成对采样，但**未完成精确时间同步**；
-- 红外目标通常只占整帧很小区域，云层边缘和背景运动容易形成伪目标；
-- 雷达 `.mat` 可能保存 MATLAB `table`，普通 `scipy.io.loadmat` 不一定能直接展开；
-- 类别出现在训练文件名中，只允许用于生成训练标签，推理时不得读取文件名中的类别字段。
-
-因此本项目采用如下路线：
+仓库已经覆盖完整工程流程：
 
 ```text
-成对文件发现
-  ├─ 雷达：MATLAB table/矩阵解析 → 数值列统计、差分与活动曲线
-  ├─ 红外：稀疏抽帧 → 帧差小目标候选 → 运动/亮度/轨迹统计
-  ├─ 同步：雷达活动曲线 × 红外活动曲线互相关估计时间偏移
-  └─ 双分支分类器 → 质量感知后融合 → 整段类别与置信度
+数据解压 → 配对检查 → MATLAB table解析 → 红外小目标跟踪
+       → 雷达/红外时间对准 → 窗口级多模态特征
+       → 批号级无泄漏交叉验证 → 最终模型训练
+       → 单对/批量推理 → 测试报告 → 比赛提交压缩包
 ```
 
-首版优先使用后融合，原因是异步数据下直接做特征级交互容易将错误时间对应关系学习成噪声。完成稳定对准和目标级标注后，再升级为时窗级跨模态网络。
+## 1. 当前算法
 
-## 2. 仓库结构
+### 雷达分支
+
+- 支持普通数值矩阵和 MATLAB `table/timetable`；
+- 支持复数信号和向量型字段；
+- 自动识别时间字段，缺少时间戳时使用视频时长估算采样率；
+- 提取统计、差分、频谱、缺失率和活动曲线特征；
+- 正式数据中出现距离、速度、SNR、RCS、方位、俯仰、点迹和航迹字段时可自动纳入。
+
+### 红外分支
+
+- CLAHE局部对比增强；
+- 帧差与中心—周围局部对比联合响应；
+- 自适应高分位阈值小目标候选；
+- 常速度预测、距离门控和短时漏检保持；
+- 提取亮度、运动、候选、速度、加速度、转向率、轨迹直线度和频域特征。
+
+### 时间同步
+
+数据说明指出雷达和红外为成对采集但未完成精确同步。本项目估计：
+
+```text
+t_ir = scale × t_radar + offset
+```
+
+既支持固定时间偏移，也支持长记录的线性时钟漂移估计。
+
+### 三分支模型
+
+- 雷达 ExtraTrees；
+- 红外 ExtraTrees；
+- 雷达—红外特征级融合 ExtraTrees；
+- 根据雷达有效率、红外跟踪率和同步质量动态融合三分支概率；
+- 将窗口结果以不确定度加权方式汇总为整段记录类别。
+
+## 2. 防止标签泄漏
+
+训练文件名中可能包含 `class-A/class-B`。类别字段只用于生成训练标签，不进入模型特征。推理接口不解析文件名标签。
+
+评价严格按批号划分。禁止把同一视频或同一雷达记录切出的窗口随机分配到训练集和验证集。
+
+## 3. 仓库结构
 
 ```text
 anti_air/
 ├── anti_air/
-│   ├── alignment.py      # 雷达—红外活动曲线互相关对准
-│   ├── dataset.py        # 文件命名解析与批号级成对发现
-│   ├── infrared.py       # 红外抽帧、小目标候选与运动特征
-│   ├── modeling.py       # 双分支随机森林与质量感知融合
-│   ├── pipeline.py       # 统一特征提取管线
-│   └── radar.py          # MATLAB table/普通矩阵读取与雷达特征
-├── configs/default.yaml  # 抽帧、对准和模型参数
+│   ├── alignment.py       # 固定偏移和时钟漂移估计
+│   ├── config.py          # 配置加载与校验
+│   ├── dataset.py         # 文件配对、manifest和标签隔离
+│   ├── evaluation.py      # 批号级无泄漏评价
+│   ├── feature_store.py   # 特征缓存和断点复用
+│   ├── infrared.py        # 红外小目标检测、跟踪和特征
+│   ├── modeling.py        # 三分支模型和质量感知融合
+│   ├── pipeline.py        # 对准窗口构建和多模态特征
+│   ├── radar.py           # MATLAB table/矩阵/复数/向量解析
+│   └── utils.py
+├── configs/
+│   ├── default.yaml       # 正式配置
+│   └── quick.yaml         # 快速联调配置
+├── docs/
+│   ├── algorithm_design.md
+│   ├── server_workflow.md
+│   └── submission_checklist.md
 ├── scripts/
-│   └── inspect_dataset.py
-├── tests/test_smoke.py
-├── train.py              # 训练入口
-├── infer.py              # 官方评测风格推理入口
-├── run_demo.sh
-├── requirements.txt
-└── pyproject.toml
+│   ├── convert_matlab_tables.m
+│   ├── generate_report.py
+│   ├── inspect_dataset.py
+│   ├── package_submission.py
+│   ├── run_all.sh
+│   ├── setup_server.sh
+│   └── unpack_data.py
+├── extract_features.py
+├── evaluate.py
+├── train.py
+├── infer.py
+├── run.sh
+├── Dockerfile
+└── Makefile
 ```
 
-## 3. 环境安装
-
-推荐 Python 3.11。
+## 4. 服务器安装
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate       # Windows: .venv\Scripts\activate
-python -m pip install --upgrade pip
-pip install -e .
+git clone https://github.com/1781988/anti_air.git
+cd anti_air
+git checkout main
+
+bash scripts/setup_server.sh
+source .venv/bin/activate
 ```
 
-开发和测试环境：
+手动方式：
 
 ```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip setuptools wheel
 pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-### MATLAB table 读取
+## 5. 解压比赛数据
 
-依赖 `mat-io` 用于读取 MATLAB `table`、`timetable` 和其他 MCOS 对象。代码会先调用：
+将 `初赛数据.7z` 上传至仓库根目录：
 
-```python
-from matio import load_from_mat
+```bash
+python scripts/unpack_data.py 初赛数据.7z --output data/train
 ```
 
-若文件本身是普通数值矩阵，则会回退到 `scipy.io.loadmat`。如果比赛环境不允许安装 `mat-io`，可预先在 MATLAB 中将表格导出为普通矩阵、CSV 或 Parquet，再替换 `anti_air/radar.py` 的读取层。
-
-## 4. 数据目录
-
-建议目录如下：
+推荐目录：
 
 ```text
 data/train/
-├── ir_339_class-B_16：18.mp4
 ├── radar_339_class-B_16：18.mat
-├── ir_357_class-A_16：32.mp4
+├── ir_339_class-B_16：18.mp4
 ├── radar_357_class-A_16：32.mat
+├── ir_357_class-A_16：32.mp4
 └── ...
 ```
 
-程序按 `批号` 配对，而不是依赖文件排序。中文全角冒号 `：` 和英文冒号 `:` 均可解析。
+程序递归查找文件并按批号配对，不依赖文件排列顺序。
 
-测试文件可以不带类别，只要仍能通过批号或显式命令行参数配对。`infer.py` 完全不读取文件名标签。
-
-## 5. 先检查数据
-
-在训练前运行：
+## 6. 数据检查
 
 ```bash
 python scripts/inspect_dataset.py \
   --data-root data/train \
-  --output outputs/dataset_inventory.json
-```
-
-输出内容包括：
-
-- 批号和训练标签；
-- 雷达表格尺寸及字段名；
-- 红外视频帧率、帧数、分辨率；
-- 文件配对情况。
-
-优先检查雷达字段是否包含距离、径向速度、方位、俯仰、SNR、RCS、点迹编号、航迹编号或时间戳。当前框架会自动提取最多64个可转换为标量数值的字段，但高分方案应按真实字段语义建立专门的信号级、点迹级和航迹级特征。
-
-## 6. 训练基线
-
-```bash
-python train.py \
-  --data-root data/train \
-  --config configs/default.yaml \
-  --output-dir outputs/baseline
+  --require-labels \
+  --output-dir outputs/inspection
 ```
 
 输出：
 
 ```text
-outputs/baseline/
-├── model.joblib
-├── radar_features.csv
-├── infrared_features.csv
-└── training_manifest.json
+outputs/inspection/dataset_inventory.json
+outputs/inspection/resolved_manifest.csv
 ```
 
-`training_manifest.json` 会记录每个批次的估计时间偏移、对准分数和模态质量。
+如果 MATLAB table 仍无法解析，可在 MATLAB 中执行：
 
-> 样例数据只有极少批次时，模型分数没有统计意义。当前阶段应先验证读取、对准、特征和接口，不能把同一视频切出的窗口随机分到训练集和验证集，否则会产生严重背景泄漏。正式验证必须按批号、采集架次或场景分组。
+```matlab
+convert_matlab_tables('data/train', 'data/train_converted')
+```
 
-## 7. 单对数据推理
+## 7. 快速联调
+
+```bash
+python extract_features.py \
+  --data-root data/train \
+  --config configs/quick.yaml \
+  --output-dir outputs/features_quick
+
+python train.py \
+  --features outputs/features_quick \
+  --config configs/quick.yaml \
+  --output-dir outputs/model_quick
+```
+
+快速配置只用于确认环境和接口，不用于最终比赛结果。
+
+## 8. 正式特征提取
+
+```bash
+python extract_features.py \
+  --data-root data/train \
+  --config configs/default.yaml \
+  --output-dir outputs/features
+```
+
+首次处理长视频耗时较长。每个批次会独立缓存至：
+
+```text
+outputs/features/records/
+```
+
+重新执行时自动复用已完成批次；原始文件或配置变化后自动重新提取。
+
+## 9. 评价性能
+
+```bash
+python evaluate.py \
+  --features outputs/features \
+  --config configs/default.yaml \
+  --output-dir outputs/evaluation
+```
+
+输出：
+
+```text
+outputs/evaluation/
+├── metrics.json
+├── folds.json
+├── record_predictions.csv
+├── window_predictions.csv
+└── confusion_matrix.csv
+```
+
+评价指标包括 Accuracy、Balanced Accuracy、Macro-F1、Weighted-F1、Log Loss、逐类指标、混淆矩阵和Macro-F1置信区间。
+
+当前提供的样例数据如果只有极少批次，程序可能报告：
+
+```text
+insufficient_grouped_data
+```
+
+这表示无法形成无泄漏且训练折包含全部类别的验证折。程序不会使用随机窗口划分制造虚高指标。完整训练数据增加后会自动执行分层批号交叉验证。
+
+## 10. 训练最终模型
+
+```bash
+python train.py \
+  --features outputs/features \
+  --config configs/default.yaml \
+  --output-dir outputs/model
+```
+
+得到：
+
+```text
+outputs/model/
+├── model.joblib
+├── training_summary.json
+└── MODEL_CARD.md
+```
+
+也可直接从原始数据完成特征提取和训练：
+
+```bash
+python train.py \
+  --data-root data/train \
+  --config configs/default.yaml \
+  --output-dir outputs/model
+```
+
+## 11. 单对数据推理
 
 ```bash
 python infer.py \
-  --radar path/to/radar_test.mat \
-  --ir path/to/ir_test.mp4 \
-  --model outputs/baseline/model.joblib \
-  --output result.json
+  --radar 'data/train/radar_339_class-B_16：18.mat' \
+  --ir 'data/train/ir_339_class-B_16：18.mp4' \
+  --model outputs/model/model.joblib \
+  --output outputs/predictions/batch_339.json
 ```
 
-也可使用：
-
-```bash
-bash run_demo.sh path/to/radar_test.mat path/to/ir_test.mp4 outputs/baseline/model.joblib
-```
-
-输出示例：
-
-```json
-{
-  "label": "class-A",
-  "confidence": 0.8731,
-  "class_probabilities": {
-    "class-A": 0.8731,
-    "class-B": 0.1269
-  },
-  "branch_probabilities": {
-    "radar": {
-      "class-A": 0.91,
-      "class-B": 0.09
-    },
-    "infrared": {
-      "class-A": 0.79,
-      "class-B": 0.21
-    }
-  },
-  "fusion_weights": {
-    "radar": 0.64,
-    "infrared": 0.36
-  },
-  "alignment": {
-    "offset_seconds": 2.4,
-    "score": 0.71,
-    "common_rate_hz": 5.0,
-    "convention": "positive means infrared activity lags radar activity"
-  },
-  "quality": {
-    "radar": 0.98,
-    "infrared": 0.42
-  }
-}
-```
-
-统一 Python 接口位于 `infer.py`：
+统一Python接口：
 
 ```python
 from infer import predict
@@ -197,135 +264,114 @@ from infer import predict
 result = predict(
     radar_path="radar_test.mat",
     infrared_path="ir_test.mp4",
-    model_path="outputs/baseline/model.joblib",
+    model_path="outputs/model/model.joblib",
+    batch_id="test-001",
 )
 ```
 
-## 8. 当前特征设计
+输出：
 
-### 8.1 雷达分支
+```json
+{
+  "batch_id": "test-001",
+  "label": "class-A",
+  "confidence": 0.8731,
+  "class_probabilities": {
+    "class-A": 0.8731,
+    "class-B": 0.1269
+  },
+  "window_count": 21,
+  "alignment": {
+    "offset_seconds": 2.4,
+    "scale": 1.0002,
+    "drift_ppm": 200.0,
+    "score": 0.71
+  }
+}
+```
 
-对每个可用数值字段计算：
+## 12. 批量测试
 
-- 缺失比例；
-- 均值、标准差、极值、中位数和分位数；
-- 四分位距和均方根；
-- 一阶差分标准差和最大绝对变化；
-- 全字段标准化后的行级活动能量，用于跨模态时间对准。
+测试文件名不需要包含类别：
 
-这些是无字段假设的通用基线。获得正式字段定义后，应增加：
+```bash
+python infer.py \
+  --data-root data/test \
+  --model outputs/model/model.joblib \
+  --output outputs/predictions/test_results.json
+```
 
-- 信号级：SNR、RCS、微多普勒谱、谱熵、周期旋翼分量；
-- 点迹级：点迹密度、凝聚度、虚警率、速度/加速度稳定性；
-- 航迹级：速度、高度、转弯率、曲率、悬停比例、机动段持续时间。
+也支持CSV manifest：
 
-### 8.2 红外分支
+```csv
+batch_id,radar_path,infrared_path,label,start_time
+001,/data/radar_001.mat,/data/ir_001.mp4,,
+```
 
-按配置稀疏抽帧，并提取：
+```bash
+python infer.py \
+  --manifest data/test_manifest.csv \
+  --model outputs/model/model.joblib \
+  --output outputs/predictions/test_results.json
+```
 
-- 灰度均值、方差、99%分位数；
-- Sobel梯度能量；
-- 帧差均值和高分位运动强度；
-- 高运动响应小连通域数量和最大面积；
-- 候选质心速度和跟踪成功率。
+## 13. 官方评测风格入口
 
-这套实现不依赖人工框标注，适合先做工程验证。正式高分方案建议人工修正一部分轨迹，训练红外小目标检测器，并对目标局部序列建模，而不是对整帧直接分类。
+```bash
+ANTI_AIR_MODEL=outputs/model/model.joblib \
+  bash run.sh radar_test.mat infrared_test.mp4 result.json
+```
 
-### 8.3 对准与融合
+提交包内部模型路径固定后可直接执行：
 
-活动曲线统一重采样后做受限互相关：
+```bash
+bash run.sh radar_test.mat infrared_test.mp4 result.json
+```
+
+## 14. 生成测试报告
+
+```bash
+python scripts/generate_report.py \
+  --metrics outputs/evaluation/metrics.json \
+  --training-summary outputs/model/training_summary.json \
+  --output outputs/report/test_report.md
+```
+
+## 15. 生成比赛提交包
+
+```bash
+python scripts/package_submission.py \
+  --model outputs/model/model.joblib \
+  --report outputs/report/test_report.md \
+  --output outputs/submission/anti_air_submission.zip
+```
+
+压缩包包含：
+
+- 算法模型；
+- 模型源代码；
+- 推理入口；
+- 依赖文件；
+- 算法设计方案；
+- 测试报告；
+- 一键运行脚本。
+
+## 16. 一键完成全部流程
+
+环境安装和数据解压完成后：
+
+```bash
+bash scripts/run_all.sh data/train configs/default.yaml
+```
+
+最终结果：
 
 ```text
-Δt* = argmax Corr(E_ir(t), E_radar(t - Δt))
+outputs/submission/anti_air_submission.zip
 ```
 
-当前输出固定偏移量。长序列后续应升级为分段偏移或线性时钟模型：
+## 17. 重要说明
 
-```text
-t_ir = a · t_radar + b
-```
+截图和现有备注没有给出组委会最终评分公式及精确输出协议，因此仓库默认使用常见分类指标并输出通用JSON。组委会发布正式评测接口后，只需调整 `infer.py` 的输入/输出适配层和 `evaluate.py` 的主指标，不需要重写特征与模型主流程。
 
-双模态融合权重同时考虑基础权重和质量：
-
-```text
-w_radar ∝ base_radar_weight × radar_valid_ratio
-w_ir    ∝ base_ir_weight    × infrared_tracking_rate
-```
-
-## 9. 配置参数
-
-主要参数位于 `configs/default.yaml`：
-
-```yaml
-infrared:
-  sample_fps: 3.0
-  resize_width: 640
-  max_samples: 2000
-
-alignment:
-  common_rate_hz: 5.0
-  max_lag_seconds: 30.0
-
-model:
-  radar_weight: 0.60
-  infrared_weight: 0.40
-  n_estimators: 400
-```
-
-调参建议：
-
-- 快速联调：`sample_fps=1`、`resize_width=320`、`max_samples=300`；
-- 正式提取：适当提高抽帧率和宽度，避免小目标被过度缩小；
-- 若目标运动很快，不应把抽帧率降得过低；
-- `max_lag_seconds` 应根据设备启动偏移范围设置。
-
-## 10. 防止训练/评测泄漏
-
-必须遵守：
-
-1. 文件名中的 `class-*` 只用于训练标签生成；
-2. 模型特征不得包含文件名、目录名或批号编码；
-3. 同一批次切出的所有窗口必须位于同一数据折；
-4. 不得将同一场景的近邻连续片段随机分到训练和验证；
-5. 归一化、特征选择和模型选择只能在训练折内完成；
-6. 测试推理必须在无标签文件名条件下仍可运行。
-
-## 11. 推荐迭代路线
-
-### 阶段A：打通数据和可复现实验
-
-- 确认MATLAB表格字段及采样频率；
-- 生成雷达字段统计和视频样例可视化；
-- 人工核验若干对准结果；
-- 建立按批号/场景分组的评测脚本。
-
-### 阶段B：建立强单模态模型
-
-- 雷达：微多普勒时频图 + TCN/1D-CNN/轻量Transformer；
-- 红外：小目标检测与连续轨迹提取 + 局部视频编码；
-- 传统树模型作为可靠对照组。
-
-### 阶段C：时窗级多模态融合
-
-- 将对准后的雷达窗口和红外目标片段形成同一训练样本；
-- 使用门控融合或Cross-Attention；
-- 对低质量/缺失模态进行随机失活训练；
-- 同时输出类别、置信度和未知类/OOD分数。
-
-### 阶段D：比赛提交封装
-
-- 固化依赖和权重；
-- 支持CPU/GPU自动选择；
-- 提供批量推理和单样本接口；
-- 输出耗时、内存和异常日志；
-- 完成算法方案、消融实验、混淆矩阵和测试报告。
-
-## 12. 已知限制
-
-- 当前红外检测是无监督帧差候选，不等于精确目标检测；
-- 当前对准只估计固定偏移，未显式估计时钟漂移；
-- 当前雷达特征尚未利用正式字段语义；
-- 当前随机森林用于建立可复现基线，不代表最终网络选择；
-- 极少样例下无法可靠估计泛化性能。
-
-这些限制均在模块边界内，可在不改动训练和推理接口的前提下逐步替换。
+详细设计见 [docs/algorithm_design.md](docs/algorithm_design.md)，服务器完整操作见 [docs/server_workflow.md](docs/server_workflow.md)。

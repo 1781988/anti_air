@@ -16,3 +16,5 @@ cache/
 *.onnx
 *.mp4
 *.mat
+*.7z
+*.zip

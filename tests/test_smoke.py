@@ -14,17 +14,27 @@ def test_parse_filename() -> None:
     assert meta["start_time"] == "16:18"
 
 
+def test_parse_unlabeled_filename() -> None:
+    meta = parse_competition_filename(Path("radar_test001_12:30.mat"))
+    assert meta["modality"] == "radar"
+    assert meta["batch_id"] == "test001"
+    assert meta["label"] is None
+    assert meta["start_time"] == "12:30"
+
+
 def test_alignment_recovers_positive_lag() -> None:
-    radar = np.zeros(100)
-    radar[20:30] = 1.0
-    infrared = np.zeros(100)
-    infrared[25:35] = 1.0
+    radar = np.zeros(200)
+    radar[40:60] = 1.0
+    infrared = np.zeros(200)
+    infrared[50:70] = 1.0
     result = estimate_alignment(
         radar,
         infrared,
         radar_rate_hz=10.0,
         infrared_rate_hz=10.0,
         common_rate_hz=10.0,
-        max_lag_seconds=2.0,
+        max_lag_seconds=3.0,
+        estimate_drift=False,
     )
-    assert abs(result.offset_seconds - 0.5) <= 0.11
+    assert abs(result.offset_seconds - 1.0) <= 0.11
+    assert result.scale == 1.0

@@ -1,3 +1,3 @@
-"""anti_air: radar-infrared target classification baseline."""
+"""Radar-infrared multimodal target classification toolkit."""
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
