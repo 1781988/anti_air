@@ -14,7 +14,12 @@ python scripts/generate_report.py \
   --output outputs/report/test_report.md
 python scripts/package_submission.py \
   --model outputs/model/model.joblib \
+  --training-summary outputs/model/training_summary.json \
+  --model-card outputs/model/MODEL_CARD.md \
+  --evaluation-dir outputs/evaluation \
+  --inspection-dir outputs/inspection \
   --report outputs/report/test_report.md \
   --output outputs/submission/anti_air_submission.zip
+python scripts/validate_submission.py outputs/submission/anti_air_submission.zip
 
 echo "Complete. Submission: outputs/submission/anti_air_submission.zip"
