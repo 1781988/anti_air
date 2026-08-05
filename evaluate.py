@@ -31,6 +31,11 @@ def main() -> None:
     result.window_predictions.to_csv(output / "window_predictions.csv", index=False)
     result.confusion.to_csv(output / "confusion_matrix.csv", index=True)
     print(f"Evaluation status={result.metrics['status']} output={output}")
+    print(f"eligible_for_primary_score: {result.metrics.get('eligible_for_primary_score', False)}")
+    print(f"evaluation_coverage: {result.metrics.get('evaluation_coverage', 0.0)}")
+    print(f"class_coverage: {result.metrics.get('class_coverage', 0.0)}")
+    if result.metrics.get("reason"):
+        print(f"reason: {result.metrics['reason']}")
     for key in ("accuracy", "balanced_accuracy", "macro_f1", "weighted_f1", "log_loss"):
         if key in result.metrics:
             print(f"{key}: {result.metrics[key]}")
