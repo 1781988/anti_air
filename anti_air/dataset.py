@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import csv
 import re
-import unicodedata
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable
 
 
 _FILENAME_RE = re.compile(
@@ -44,112 +43,8 @@ def parse_competition_filename(path: str | Path) -> dict[str, str | None]:
 
 
 def _resolve_path(root: Path, value: str) -> Path:
-    path = Path(value).expanduser()
-    return path.resolve() if path.is_absolute() else (root / path).resolve()
-
-
-def _normalized_filename(name: str) -> str:
-    return unicodedata.normalize("NFKC", name).casefold()
-
-
-def _unique_existing_roots(path: Path, search_roots: Sequence[str | Path] | None) -> list[Path]:
-    roots: list[Path] = []
-
-    def add(value: str | Path) -> None:
-        candidate = Path(value).expanduser()
-        try:
-            candidate = candidate.resolve()
-        except OSError:
-            return
-        if candidate.is_file():
-            candidate = candidate.parent
-        if candidate.is_dir() and candidate not in roots:
-            roots.append(candidate)
-
-    if path.parent.exists():
-        add(path.parent)
-    else:
-        current = path.parent
-        while current != current.parent and not current.exists():
-            current = current.parent
-        if current.exists():
-            add(current)
-
-    for root in search_roots or ():
-        add(root)
-    add(Path.cwd() / "data" / "train")
-    add(Path.cwd() / "data")
-    add(Path.cwd())
-    return roots
-
-
-def resolve_input_file(
-    value: str | Path,
-    *,
-    modality: str,
-    batch_id: str | None = None,
-    search_roots: Sequence[str | Path] | None = None,
-) -> Path:
-    """Resolve a single competition input robustly.
-
-    Competition archives frequently contain one or more top-level directories.
-    A user may therefore provide ``data/train/<filename>`` while the real file
-    is ``data/train/<archive-folder>/<filename>``. This function first accepts
-    an existing path, then recursively searches likely roots by Unicode-normalized
-    filename and finally by competition batch ID.
-    """
-
-    modality = modality.lower()
-    expected_suffix = ".mp4" if modality == "ir" else ".mat"
-    raw = Path(value).expanduser()
-    direct = raw.resolve() if raw.is_absolute() else (Path.cwd() / raw).resolve()
-    if direct.is_file():
-        return direct
-
-    roots = _unique_existing_roots(direct, search_roots)
-    target_name = _normalized_filename(raw.name)
-    exact: list[Path] = []
-    batch_matches: list[Path] = []
-
-    for root in roots:
-        for candidate in root.rglob("*"):
-            if not candidate.is_file() or candidate.suffix.lower() != expected_suffix:
-                continue
-            resolved = candidate.resolve()
-            if _normalized_filename(candidate.name) == target_name:
-                exact.append(resolved)
-                continue
-            if batch_id is None:
-                continue
-            try:
-                meta = parse_competition_filename(candidate)
-            except ValueError:
-                continue
-            if meta["modality"] == modality and str(meta["batch_id"]) == str(batch_id):
-                batch_matches.append(resolved)
-
-    def deduplicate(items: list[Path]) -> list[Path]:
-        return list(dict.fromkeys(items))
-
-    exact = deduplicate(exact)
-    batch_matches = deduplicate(batch_matches)
-    candidates = exact or batch_matches
-    if len(candidates) == 1:
-        return candidates[0]
-    if len(candidates) > 1:
-        rendered = "\n  - ".join(str(item) for item in candidates)
-        raise RuntimeError(
-            f"Multiple {modality} files match batch={batch_id!r} and input={value!r}:\n  - {rendered}\n"
-            "Use the exact path or a normalized manifest to disambiguate."
-        )
-
-    searched = "\n  - ".join(str(root) for root in roots) or "<none>"
-    raise FileNotFoundError(
-        f"{modality} input file does not exist and could not be found recursively: {direct}\n"
-        f"Searched roots:\n  - {searched}\n"
-        "Run scripts/inspect_dataset.py and use outputs/inspection/resolved_manifest.csv, "
-        "or invoke infer.py with --data-root and --batch-id."
-    )
+    path = Path(value)
+    return path if path.is_absolute() else (root / path).resolve()
 
 
 def load_manifest(path: str | Path, *, require_labels: bool) -> list[Sample]:
