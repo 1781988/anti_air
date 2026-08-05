@@ -26,10 +26,15 @@ def _record_to_result(record: pd.Series, classes: list[str], manifest: dict[str,
     }
     if manifest and manifest.get("records"):
         item = manifest["records"][0]
+        infrared_metadata = item.get("infrared_metadata", {})
         result["alignment"] = item.get("alignment")
         result["quality"] = {
             "radar": item.get("radar_metadata", {}).get("valid_ratio"),
-            "infrared": item.get("infrared_metadata", {}).get("quality"),
+            "infrared": infrared_metadata.get("quality"),
+        }
+        result["video_decoder"] = {
+            "backend": infrared_metadata.get("decoder_backend"),
+            "codec": infrared_metadata.get("decoder_codec"),
         }
     return result
 
@@ -41,16 +46,16 @@ def predict(
     *,
     batch_id: str = "inference",
 ) -> dict[str, Any]:
-    bundle: ModelBundle = joblib.load(model_path)
+    model = Path(model_path).expanduser().resolve()
     radar = Path(radar_path).expanduser().resolve()
     infrared = Path(infrared_path).expanduser().resolve()
-    model = Path(model_path).expanduser().resolve()
     if not model.is_file():
         raise FileNotFoundError(f"Model file not found: {model}")
     if not radar.is_file():
         raise FileNotFoundError(f"Radar file not found: {radar}")
     if not infrared.is_file():
         raise FileNotFoundError(f"Infrared video not found: {infrared}")
+    bundle: ModelBundle = joblib.load(model)
     sample = Sample(
         batch_id=batch_id,
         radar_path=radar,
@@ -101,7 +106,10 @@ def main() -> None:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
-    bundle: ModelBundle = joblib.load(args.model)
+    model = Path(args.model).expanduser().resolve()
+    if not model.is_file():
+        raise FileNotFoundError(f"Model file not found: {model}")
+    bundle: ModelBundle = joblib.load(model)
     samples = resolve_samples(
         data_root=args.data_root,
         manifest=args.manifest,
