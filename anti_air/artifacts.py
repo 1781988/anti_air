@@ -71,6 +71,7 @@ def create_submission(
         "README.md",
         "run.sh",
         "setup.sh",
+        "tests",
     ]
     with tempfile.TemporaryDirectory(prefix="anti_air_submission_") as directory:
         staging = Path(directory) / "anti_air_submission"

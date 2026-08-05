@@ -81,7 +81,7 @@ anti_air/
 推荐：
 
 - Ubuntu 20.04/22.04/24.04；
-- Python 3.11；
+- Python 3.11或3.12；
 - CUDA GPU，显存建议8GB以上；
 - 纯CPU也可运行，但会自动使用较轻的`cpu`配置；
 - FFmpeg用于稳定读取MP4。
@@ -90,7 +90,7 @@ anti_air/
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y git ffmpeg python3.11 python3.11-venv
+sudo apt-get install -y git ffmpeg python3 python3-venv
 ```
 
 下载和配置：
