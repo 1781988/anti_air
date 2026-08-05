@@ -1,0 +1,53 @@
+# auto: CUDA服务器使用competition；纯CPU服务器使用cpu。
+# 首次联调可执行: python main.py all --profile quick
+profile: auto
+seed: 2026
+
+paths:
+  data: data/train
+  cache: .cache/anti_air
+  run: runs/latest
+
+common:
+  window_seconds: 12.0
+  window_stride_seconds: 6.0
+  max_windows_per_record: 240
+  max_alignment_lag_seconds: 45.0
+  radar_channels: 32
+  radar_steps: 128
+  radar_vector_expansion: 8
+  vision_backbone: mobilenet_v3_small
+  pretrained_vision: true
+  num_workers: 2
+  label_smoothing: 0.05
+  weight_decay: 0.0001
+  learning_rate: 0.0003
+  backbone_learning_rate: 0.00003
+  early_stop_patience: 5
+  evaluation_folds: 5
+
+profiles:
+  quick:
+    image_size: 96
+    frames_per_window: 4
+    video_sample_fps: 1.0
+    max_video_samples: 500
+    epochs: 2
+    freeze_backbone_epochs: 2
+    batch_size: 8
+  cpu:
+    image_size: 112
+    frames_per_window: 6
+    video_sample_fps: 1.5
+    max_video_samples: 1600
+    epochs: 8
+    freeze_backbone_epochs: 8
+    batch_size: 8
+  competition:
+    image_size: 160
+    frames_per_window: 12
+    video_sample_fps: 3.0
+    max_video_samples: 5000
+    epochs: 24
+    freeze_backbone_epochs: 4
+    batch_size: 12

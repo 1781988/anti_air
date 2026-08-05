@@ -2,19 +2,10 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
-venv/
-.env
-.DS_Store
+.cache/
+runs/
+prediction.json
 
-# Competition data and generated artifacts
-data/
-outputs/
-cache/
-*.joblib
-*.pkl
-*.pt
-*.onnx
-*.mp4
-*.mat
-*.7z
-*.zip
+# Competition data: keep only placeholders/documentation.
+data/train/*
+!data/train/.gitkeep

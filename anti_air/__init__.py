@@ -1,3 +1,3 @@
-"""Radar-infrared multimodal target classification toolkit."""
+"""Radar-infrared target classification competition package."""
 
-__version__ = "1.1.0"
+__version__ = "2.0.0"
