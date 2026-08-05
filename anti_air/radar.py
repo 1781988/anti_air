@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 import re
+import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,11 +27,25 @@ class RadarSequence:
 
 
 def _load_mat_dictionary(path: Path) -> dict[str, Any]:
+    """Load a MAT file while preserving unsupported MATLAB table payloads.
+
+    ``mat-io`` currently returns the raw property mapping when it encounters a
+    MATLAB v5 table. That mapping is still usable: ``_candidate_to_frame``
+    reconstructs it into a DataFrame. Only the known converter warning is
+    suppressed; all other warnings remain visible.
+    """
+
     matio_error: Exception | None = None
     try:
         from matio import load_from_mat
 
-        return load_from_mat(path, raw_data=False, add_table_attrs=True)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"mat_to_table: MATLAB table version .* is not supported\.",
+                category=UserWarning,
+            )
+            return load_from_mat(path, raw_data=False, add_table_attrs=True)
     except Exception as exc:
         matio_error = exc
     try:
@@ -44,6 +60,173 @@ def _load_mat_dictionary(path: Path) -> dict[str, Any]:
         ) from scipy_error
 
 
+def _matlab_text(value: Any) -> str | None:
+    """Best-effort conversion of MATLAB char/string/cell scalars to text."""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    try:
+        array = np.asarray(value)
+    except Exception:
+        return str(value)
+    if array.size == 0:
+        return None
+    if array.dtype.kind in {"U", "S"}:
+        flattened = array.reshape(-1).tolist()
+        decoded = [
+            item.decode("utf-8", errors="replace") if isinstance(item, bytes) else str(item)
+            for item in flattened
+        ]
+        if decoded and all(len(item) <= 1 for item in decoded):
+            return "".join(decoded)
+        return str(decoded[0])
+    if array.size == 1:
+        item = array.reshape(-1)[0]
+        if item is value:
+            return str(item)
+        return _matlab_text(item)
+    return str(array.reshape(-1)[0])
+
+
+def _matlab_int(value: Any, default: int) -> int:
+    try:
+        array = np.asarray(value)
+        if array.size:
+            return int(array.reshape(-1)[0])
+    except Exception:
+        pass
+    return default
+
+
+def _fit_column_length(values: Any, nrows: int) -> np.ndarray:
+    """Return a one-dimensional array with exactly ``nrows`` entries."""
+
+    array = np.asarray(values)
+    if array.ndim == 0:
+        array = array.reshape(1)
+    array = array.reshape(-1)
+    if nrows <= 0:
+        return array
+    if len(array) == nrows:
+        return array
+    if len(array) > nrows:
+        return array[:nrows]
+    padded = np.empty(nrows, dtype=object)
+    padded[:] = None
+    padded[: len(array)] = array
+    return padded
+
+
+def _table_column_frames(column: Any, var_name: str, nrows: int) -> dict[str, np.ndarray]:
+    """Expand one serialized MATLAB table variable into DataFrame columns."""
+
+    array = np.asarray(column)
+    if array.ndim == 0:
+        return {var_name: _fit_column_length(array, nrows)}
+    if nrows > 0 and array.ndim >= 2:
+        if array.shape[0] == nrows:
+            reshaped = array.reshape(nrows, -1)
+            if reshaped.shape[1] == 1:
+                return {var_name: reshaped[:, 0]}
+            return {
+                f"{var_name}_{idx + 1}": reshaped[:, idx]
+                for idx in range(reshaped.shape[1])
+            }
+        if array.shape[-1] == nrows:
+            moved = np.moveaxis(array, -1, 0).reshape(nrows, -1)
+            if moved.shape[1] == 1:
+                return {var_name: moved[:, 0]}
+            return {
+                f"{var_name}_{idx + 1}": moved[:, idx]
+                for idx in range(moved.shape[1])
+            }
+    if array.ndim == 2 and array.shape[1] == 1:
+        return {var_name: _fit_column_length(array[:, 0], nrows)}
+    if array.ndim == 2 and array.shape[0] == 1:
+        return {var_name: _fit_column_length(array[0, :], nrows)}
+    return {var_name: _fit_column_length(array, nrows)}
+
+
+def _matlab_table_mapping_to_frame(value: Mapping[str, Any], name: str) -> pd.DataFrame | None:
+    """Reconstruct the raw mapping returned for MATLAB v5 tables.
+
+    ``mat-io`` supports table serialization versions up to 4. For version 5 it
+    returns the property mapping. The core payload remains ``data`` plus
+    ``varnames`` and ``nrows``/``nvars``, so it can be reconstructed without
+    MATLAB.
+    """
+
+    lowered = {str(key).lower(): key for key in value.keys()}
+    if "data" not in lowered or "varnames" not in lowered:
+        for nested_key in ("properties", "property_map"):
+            actual_key = lowered.get(nested_key)
+            if actual_key is not None and isinstance(value[actual_key], Mapping):
+                frame = _matlab_table_mapping_to_frame(value[actual_key], name)
+                if frame is not None:
+                    return frame
+        return None
+
+    data_array = np.asarray(value[lowered["data"]], dtype=object)
+    data_columns = list(data_array.reshape(-1))
+    varnames_array = np.asarray(value[lowered["varnames"]], dtype=object).reshape(-1)
+    varnames = [
+        _matlab_text(item) or f"{name}_{idx + 1}"
+        for idx, item in enumerate(varnames_array)
+    ]
+
+    nvars_default = min(len(data_columns), len(varnames)) if varnames else len(data_columns)
+    nvars_key = lowered.get("nvars")
+    nvars = _matlab_int(value[nvars_key], nvars_default) if nvars_key is not None else nvars_default
+    nvars = min(max(nvars, 0), len(data_columns))
+    if nvars == 0:
+        return None
+    if len(varnames) < nvars:
+        varnames.extend(f"{name}_{idx + 1}" for idx in range(len(varnames), nvars))
+
+    inferred_rows = 0
+    for column in data_columns[:nvars]:
+        array = np.asarray(column)
+        if array.ndim > 0 and array.size:
+            inferred_rows = max(inferred_rows, int(array.shape[0]))
+    nrows_key = lowered.get("nrows")
+    nrows = _matlab_int(value[nrows_key], inferred_rows) if nrows_key is not None else inferred_rows
+    if nrows <= 0:
+        nrows = inferred_rows
+    if nrows <= 0:
+        return None
+
+    columns: dict[str, Any] = {}
+    for idx in range(nvars):
+        variable_name = str(varnames[idx])
+        expanded = _table_column_frames(data_columns[idx], variable_name, nrows)
+        for candidate_name, candidate_values in expanded.items():
+            unique_name = candidate_name
+            suffix = 2
+            while unique_name in columns:
+                unique_name = f"{candidate_name}_{suffix}"
+                suffix += 1
+            columns[unique_name] = candidate_values
+    try:
+        frame = pd.DataFrame(columns)
+    except Exception:
+        return None
+
+    rownames_key = lowered.get("rownames")
+    if rownames_key is not None:
+        rownames = np.asarray(value[rownames_key], dtype=object).reshape(-1)
+        if len(rownames) == len(frame):
+            frame.index = [
+                _matlab_text(item) or str(idx)
+                for idx, item in enumerate(rownames)
+            ]
+    frame.attrs["matlab_table_fallback"] = True
+    return frame
+
+
 def _candidate_to_frame(value: Any, name: str) -> pd.DataFrame | None:
     if isinstance(value, pd.DataFrame):
         frame = value.copy()
@@ -51,6 +234,16 @@ def _candidate_to_frame(value: Any, name: str) -> pd.DataFrame | None:
         return frame
     if isinstance(value, pd.Series):
         return value.to_frame(name=name)
+    if isinstance(value, Mapping):
+        table_frame = _matlab_table_mapping_to_frame(value, name)
+        if table_frame is not None:
+            return table_frame
+        try:
+            frame = pd.DataFrame(value)
+            if not frame.empty:
+                return frame
+        except Exception:
+            return None
     if isinstance(value, np.ndarray):
         if value.dtype.names:
             return pd.DataFrame.from_records(value.reshape(-1))
@@ -59,10 +252,20 @@ def _candidate_to_frame(value: Any, name: str) -> pd.DataFrame | None:
         if value.ndim == 1:
             return pd.DataFrame({name: list(value)})
         if value.ndim == 2 and min(value.shape) > 0:
-            return pd.DataFrame(value, columns=[f"{name}_{idx}" for idx in range(value.shape[1])])
+            return pd.DataFrame(
+                value,
+                columns=[f"{name}_{idx}" for idx in range(value.shape[1])],
+            )
+    if hasattr(value, "properties") and isinstance(value.properties, Mapping):
+        table_frame = _matlab_table_mapping_to_frame(value.properties, name)
+        if table_frame is not None:
+            return table_frame
     if hasattr(value, "__dict__"):
         fields = {key: val for key, val in vars(value).items() if not key.startswith("_")}
         if fields:
+            table_frame = _matlab_table_mapping_to_frame(fields, name)
+            if table_frame is not None:
+                return table_frame
             try:
                 return pd.DataFrame(fields)
             except Exception:
@@ -81,8 +284,15 @@ def load_radar_frame(path: str | Path) -> pd.DataFrame:
         if frame is not None and not frame.empty:
             candidates.append(frame)
     if not candidates:
-        raise ValueError(f"No table or matrix found in radar file: {input_path}")
-    frame = max(candidates, key=lambda item: item.shape[0] * max(1, item.shape[1])).reset_index(drop=True)
+        visible = [str(key) for key in raw.keys() if not str(key).startswith("__")]
+        raise ValueError(
+            f"No table or matrix found in radar file: {input_path}. "
+            f"Visible MAT variables: {visible or 'none'}"
+        )
+    frame = max(
+        candidates,
+        key=lambda item: item.shape[0] * max(1, item.shape[1]),
+    ).reset_index(drop=True)
     if frame.shape[0] < frame.shape[1] and frame.shape[0] <= 8:
         frame = frame.T.reset_index(drop=True)
         frame.columns = [f"signal_{idx}" for idx in range(frame.shape[1])]
@@ -112,7 +322,9 @@ def _object_scalar(value: Any) -> float:
 
 def _expand_column(series: pd.Series, name: str, max_vector_expansion: int) -> dict[str, pd.Series]:
     if pd.api.types.is_datetime64_any_dtype(series):
-        return {name: pd.Series(series.astype("int64") / 1e9, index=series.index, dtype=float)}
+        return {
+            name: pd.Series(series.astype("int64") / 1e9, index=series.index, dtype=float)
+        }
     if pd.api.types.is_numeric_dtype(series):
         values = series.to_numpy()
         if np.iscomplexobj(values):
@@ -181,7 +393,9 @@ def numeric_radar_frame(
     converted: dict[str, pd.Series] = {}
     for column in frame.columns:
         name = _clean_name(str(column))
-        for expanded_name, expanded in _expand_column(frame[column], name, max_vector_expansion).items():
+        for expanded_name, expanded in _expand_column(
+            frame[column], name, max_vector_expansion
+        ).items():
             if expanded.notna().any():
                 unique_name = expanded_name
                 suffix = 1
@@ -198,7 +412,11 @@ def numeric_radar_frame(
     return pd.DataFrame(converted).replace([np.inf, -np.inf], np.nan)
 
 
-def _infer_times(frame: pd.DataFrame, numeric: pd.DataFrame, duration_hint: float | None) -> tuple[np.ndarray, float, str]:
+def _infer_times(
+    frame: pd.DataFrame,
+    numeric: pd.DataFrame,
+    duration_hint: float | None,
+) -> tuple[np.ndarray, float, str]:
     for column in frame.columns:
         if not _TIME_HINT.search(_clean_name(str(column))):
             continue
@@ -211,7 +429,11 @@ def _infer_times(frame: pd.DataFrame, numeric: pd.DataFrame, duration_hint: floa
                     values = parsed.astype("int64").to_numpy(dtype=np.float64) / 1e9
                     values = values - np.nanmin(values[valid.to_numpy()])
                     diffs = np.diff(values[np.isfinite(values)])
-                    step = float(np.median(diffs[diffs > 0])) if np.any(diffs > 0) else math.nan
+                    step = (
+                        float(np.median(diffs[diffs > 0]))
+                        if np.any(diffs > 0)
+                        else math.nan
+                    )
                     if math.isfinite(step) and step > 0:
                         return values, 1.0 / step, str(column)
         except Exception:
@@ -264,12 +486,22 @@ def extract_radar_sequence(
     values = _fill_numeric(numeric)
     center = np.median(values, axis=0)
     scale = np.median(np.abs(values - center), axis=0) * 1.4826
-    scale[scale < 1e-8] = np.std(values[:, scale < 1e-8], axis=0) if np.any(scale < 1e-8) else scale[scale < 1e-8]
+    scale[scale < 1e-8] = (
+        np.std(values[:, scale < 1e-8], axis=0)
+        if np.any(scale < 1e-8)
+        else scale[scale < 1e-8]
+    )
     scale[scale < 1e-8] = 1.0
     standardized = (values - center) / scale
-    delta = np.vstack([np.zeros((1, standardized.shape[1])), np.diff(standardized, axis=0)])
+    delta = np.vstack(
+        [np.zeros((1, standardized.shape[1])), np.diff(standardized, axis=0)]
+    )
     activity = np.sqrt(np.mean(delta**2, axis=1))
-    duration = float(times[-1] - times[0] + 1.0 / max(rate_hz, 1e-9)) if len(times) else 0.0
+    duration = (
+        float(times[-1] - times[0] + 1.0 / max(rate_hz, 1e-9))
+        if len(times)
+        else 0.0
+    )
     return RadarSequence(
         frame=numeric.reset_index(drop=True),
         times=np.asarray(times, dtype=np.float64),
@@ -282,24 +514,40 @@ def extract_radar_sequence(
             "numeric_columns": int(numeric.shape[1]),
             "valid_ratio": float(np.isfinite(numeric.to_numpy(dtype=float)).mean()),
             "time_source": time_source,
+            "matlab_table_fallback": bool(
+                raw_frame.attrs.get("matlab_table_fallback", False)
+            ),
         },
     )
 
 
-def _spectral_features(values: np.ndarray, rate_hz: float, prefix: str, bins: int) -> dict[str, float]:
+def _spectral_features(
+    values: np.ndarray,
+    rate_hz: float,
+    prefix: str,
+    bins: int,
+) -> dict[str, float]:
     x = np.asarray(values, dtype=np.float64)
     x = x[np.isfinite(x)]
     result: dict[str, float] = {}
     if x.size < 4 or rate_hz <= 0:
-        return {f"{prefix}__spectral_entropy": math.nan, f"{prefix}__dominant_hz": math.nan}
+        return {
+            f"{prefix}__spectral_entropy": math.nan,
+            f"{prefix}__dominant_hz": math.nan,
+        }
     x = signal.detrend(x)
     frequencies, power = signal.periodogram(x, fs=rate_hz)
     if power.size <= 1 or float(np.sum(power[1:])) <= 0:
-        return {f"{prefix}__spectral_entropy": 0.0, f"{prefix}__dominant_hz": 0.0}
+        return {
+            f"{prefix}__spectral_entropy": 0.0,
+            f"{prefix}__dominant_hz": 0.0,
+        }
     frequencies = frequencies[1:]
     power = power[1:]
     probabilities = power / np.sum(power)
-    entropy = -float(np.sum(probabilities * np.log(probabilities + 1e-12))) / math.log(len(probabilities))
+    entropy = -float(
+        np.sum(probabilities * np.log(probabilities + 1e-12))
+    ) / math.log(len(probabilities))
     result[f"{prefix}__spectral_entropy"] = entropy
     result[f"{prefix}__dominant_hz"] = float(frequencies[int(np.argmax(power))])
     edges = np.linspace(0.0, max(rate_hz / 2.0, 1e-9), bins + 1)
@@ -310,13 +558,32 @@ def _spectral_features(values: np.ndarray, rate_hz: float, prefix: str, bins: in
     return result
 
 
-def _series_features(values: np.ndarray, prefix: str, rate_hz: float, spectral_bins: int) -> dict[str, float]:
+def _series_features(
+    values: np.ndarray,
+    prefix: str,
+    rate_hz: float,
+    spectral_bins: int,
+) -> dict[str, float]:
     x = np.asarray(values, dtype=np.float64)
     finite = x[np.isfinite(x)]
-    keys = ["mean", "std", "min", "max", "median", "q10", "q90", "iqr", "rms", "diff_std", "diff_abs_max"]
+    keys = [
+        "mean",
+        "std",
+        "min",
+        "max",
+        "median",
+        "q10",
+        "q90",
+        "iqr",
+        "rms",
+        "diff_std",
+        "diff_abs_max",
+    ]
     if finite.size == 0:
         return {f"{prefix}__{key}": math.nan for key in keys}
-    q10, q25, q50, q75, q90 = np.quantile(finite, [0.1, 0.25, 0.5, 0.75, 0.9])
+    q10, q25, q50, q75, q90 = np.quantile(
+        finite, [0.1, 0.25, 0.5, 0.75, 0.9]
+    )
     diffs = np.diff(finite)
     result = {
         f"{prefix}__mean": float(np.mean(finite)),
@@ -329,7 +596,9 @@ def _series_features(values: np.ndarray, prefix: str, rate_hz: float, spectral_b
         f"{prefix}__iqr": float(q75 - q25),
         f"{prefix}__rms": float(np.sqrt(np.mean(finite**2))),
         f"{prefix}__diff_std": float(np.std(diffs)) if diffs.size else 0.0,
-        f"{prefix}__diff_abs_max": float(np.max(np.abs(diffs))) if diffs.size else 0.0,
+        f"{prefix}__diff_abs_max": (
+            float(np.max(np.abs(diffs))) if diffs.size else 0.0
+        ),
     }
     result.update(_spectral_features(finite, rate_hz, prefix, spectral_bins))
     return result
@@ -345,12 +614,25 @@ def radar_window_features(
     mask = (sequence.times >= start_seconds) & (sequence.times < end_seconds)
     indices = np.flatnonzero(mask)
     if indices.size == 0:
-        indices = np.array([int(np.argmin(np.abs(sequence.times - (start_seconds + end_seconds) / 2.0)))])
+        indices = np.array(
+            [
+                int(
+                    np.argmin(
+                        np.abs(
+                            sequence.times
+                            - (start_seconds + end_seconds) / 2.0
+                        )
+                    )
+                )
+            ]
+        )
     frame = sequence.frame.iloc[indices]
     features: dict[str, float] = {
         "meta__rows": float(len(frame)),
         "meta__duration": float(max(end_seconds - start_seconds, 0.0)),
-        "quality__valid_ratio": float(np.isfinite(frame.to_numpy(dtype=float)).mean()),
+        "quality__valid_ratio": float(
+            np.isfinite(frame.to_numpy(dtype=float)).mean()
+        ),
     }
     for column in frame.columns:
         features.update(
@@ -362,6 +644,12 @@ def radar_window_features(
             )
         )
     activity = sequence.activity[indices]
-    features.update(_series_features(activity, "activity", sequence.rate_hz, spectral_bins))
-    coverage = min(1.0, len(indices) / max(1.0, (end_seconds - start_seconds) * sequence.rate_hz))
+    features.update(
+        _series_features(activity, "activity", sequence.rate_hz, spectral_bins)
+    )
+    coverage = min(
+        1.0,
+        len(indices)
+        / max(1.0, (end_seconds - start_seconds) * sequence.rate_hz),
+    )
     return features, float(coverage)
