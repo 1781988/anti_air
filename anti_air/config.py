@@ -37,6 +37,7 @@ def validate_config(config: dict[str, Any]) -> None:
     radar = config["radar"]
     window = config["window"]
     model = config["model"]
+    evaluation = config["evaluation"]
     if float(ir["sample_fps"]) <= 0:
         raise ValueError("infrared.sample_fps must be positive")
     if int(ir["resize_width"]) < 0:
@@ -46,5 +47,13 @@ def validate_config(config: dict[str, Any]) -> None:
     if float(window["length_seconds"]) <= 0 or float(window["stride_seconds"]) <= 0:
         raise ValueError("window length and stride must be positive")
     weights = model["branch_weights"]
-    if sum(max(0.0, float(v)) for v in weights.values()) <= 0:
+    if sum(max(0.0, float(value)) for value in weights.values()) <= 0:
         raise ValueError("At least one model branch weight must be positive")
+    for key in ("probability_smoothing", "small_sample_probability_smoothing"):
+        value = float(model.get(key, 0.0))
+        if not 0.0 <= value < 1.0:
+            raise ValueError(f"model.{key} must be in [0, 1)")
+    if int(model.get("confidence_record_target_per_class", 5)) <= 0:
+        raise ValueError("model.confidence_record_target_per_class must be positive")
+    if int(evaluation.get("min_records_for_confidence_interval", 10)) < 2:
+        raise ValueError("evaluation.min_records_for_confidence_interval must be at least 2")
