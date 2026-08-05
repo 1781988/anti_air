@@ -54,15 +54,21 @@ def main() -> None:
         "config": config,
     }
     json_dump(summary, output / "training_summary.json")
+    warning = summary.get("training_data_warning") or "None"
     (output / "MODEL_CARD.md").write_text(
         "# Anti-Air Model Card\n\n"
         f"- Model version: `{bundle.version}`\n"
-        f"- Records: `{summary['records']}`\n"
-        f"- Windows: `{summary['windows']}`\n"
+        f"- Independent records: `{summary['records']}`\n"
+        f"- Derived windows: `{summary['windows']}`\n"
         f"- Classes: `{', '.join(summary['classes'])}`\n"
-        f"- Class record counts: `{summary['class_record_counts']}`\n\n"
+        f"- Class record counts: `{summary['class_record_counts']}`\n"
+        f"- Minimum records per class: `{summary.get('minimum_records_per_class')}`\n"
+        f"- Record-level confidence reliability: `{summary.get('record_level_confidence_reliability')}`\n"
+        f"- Effective probability smoothing: `{summary.get('effective_probability_smoothing')}`\n"
+        f"- Training data warning: `{warning}`\n\n"
         "The model contains radar, infrared and feature-level fusion ExtraTrees branches. "
-        "Window probabilities are quality-weighted and aggregated at record level.\n",
+        "Window probabilities are quality-weighted and aggregated at record level. "
+        "Derived windows are not independent samples; independent record counts determine evaluation validity.\n",
         encoding="utf-8",
     )
     print(f"Training complete: model={output / 'model.joblib'}")
