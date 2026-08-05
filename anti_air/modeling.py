@@ -81,26 +81,51 @@ def fit_branch(
     return BranchArtifact(model=model, columns=columns, classes=classes)
 
 
+def _effective_probability_smoothing(
+    config: dict[str, Any],
+    class_record_counts: dict[str, int],
+) -> tuple[float, float]:
+    model_config = config["model"]
+    base = max(0.0, float(model_config.get("probability_smoothing", 0.0)))
+    extra_max = max(0.0, float(model_config.get("small_sample_probability_smoothing", 0.0)))
+    target = max(1, int(model_config.get("confidence_record_target_per_class", 5)))
+    minimum = min(class_record_counts.values()) if class_record_counts else 0
+    reliability = min(1.0, minimum / target)
+    effective = min(0.95, base + extra_max * (1.0 - reliability))
+    return effective, reliability
+
+
 def fit_model_bundle(tables: FeatureTables, config: dict[str, Any]) -> ModelBundle:
     seed = int(config["seed"])
     n_jobs = int(config.get("runtime", {}).get("n_jobs", -1))
     classes = sorted(tables.fusion["label"].astype(str).unique().tolist())
+    class_record_counts = (
+        tables.fusion[["batch_id", "label"]]
+        .drop_duplicates()["label"]
+        .astype(str)
+        .value_counts()
+        .sort_index()
+        .to_dict()
+    )
+    effective_smoothing, record_reliability = _effective_probability_smoothing(config, class_record_counts)
     summary = {
         "records": int(tables.fusion["batch_id"].nunique()),
         "windows": int(len(tables.fusion)),
         "classes": classes,
-        "class_record_counts": (
-            tables.fusion[["batch_id", "label"]]
-            .drop_duplicates()["label"]
-            .astype(str)
-            .value_counts()
-            .sort_index()
-            .to_dict()
-        ),
+        "class_record_counts": class_record_counts,
         "class_window_counts": tables.fusion["label"].astype(str).value_counts().sort_index().to_dict(),
+        "minimum_records_per_class": int(min(class_record_counts.values())) if class_record_counts else 0,
+        "record_level_confidence_reliability": float(record_reliability),
+        "effective_probability_smoothing": float(effective_smoothing),
+        "training_data_warning": (
+            "Independent record counts are below the configured confidence target; "
+            "probabilities are regularized and must not be interpreted as calibrated risk."
+            if record_reliability < 1.0
+            else None
+        ),
     }
     return ModelBundle(
-        version="1.0.0",
+        version="1.1.0",
         config=config,
         classes=classes,
         radar=fit_branch(tables.radar, config, seed=seed + 11, n_jobs=n_jobs),
@@ -133,7 +158,9 @@ def predict_window_probabilities(bundle: ModelBundle, tables: FeatureTables) -> 
     branch_weights = bundle.config["model"]["branch_weights"]
     radar_quality = np.clip(fusion["radar_quality"].to_numpy(dtype=float), 0.02, 1.0)
     infrared_quality = np.clip(fusion["infrared_quality"].to_numpy(dtype=float), 0.02, 1.0)
-    sync_score = pd.to_numeric(fusion.get("sync__score", pd.Series(np.zeros(len(fusion)))), errors="coerce").fillna(0.0)
+    sync_score = pd.to_numeric(
+        fusion.get("sync__score", pd.Series(np.zeros(len(fusion)))), errors="coerce"
+    ).fillna(0.0)
     sync_quality = np.clip((sync_score.to_numpy(dtype=float) + 1.0) / 2.0, 0.05, 1.0)
 
     wr = float(branch_weights.get("radar", 0.30)) * radar_quality
@@ -143,12 +170,23 @@ def predict_window_probabilities(bundle: ModelBundle, tables: FeatureTables) -> 
     wr, wi, wf = wr / weight_sum, wi / weight_sum, wf / weight_sum
     probability = wr[:, None] * radar_probability + wi[:, None] * infrared_probability + wf[:, None] * fusion_probability
 
-    smoothing = float(bundle.config["model"].get("probability_smoothing", 0.0))
+    smoothing = float(
+        bundle.training_summary.get(
+            "effective_probability_smoothing",
+            bundle.config["model"].get("probability_smoothing", 0.0),
+        )
+    )
     if smoothing > 0:
         probability = (1.0 - smoothing) * probability + smoothing / len(bundle.classes)
     probability = probability / np.maximum(probability.sum(axis=1, keepdims=True), 1e-12)
 
-    output = fusion[[column for column in ["window_id", "batch_id", "label", "ir_start_seconds", "ir_end_seconds"] if column in fusion]].copy()
+    output = fusion[
+        [
+            column
+            for column in ["window_id", "batch_id", "label", "ir_start_seconds", "ir_end_seconds"]
+            if column in fusion
+        ]
+    ].copy()
     for index, label in enumerate(bundle.classes):
         output[f"prob__{label}"] = probability[:, index]
         output[f"radar_prob__{label}"] = radar_probability[:, index]
@@ -157,6 +195,7 @@ def predict_window_probabilities(bundle: ModelBundle, tables: FeatureTables) -> 
     output["weight__radar"] = wr
     output["weight__infrared"] = wi
     output["weight__fusion"] = wf
+    output["effective_probability_smoothing"] = smoothing
     output["window_confidence"] = probability.max(axis=1)
     output["predicted_label"] = [bundle.classes[index] for index in probability.argmax(axis=1)]
     return output
