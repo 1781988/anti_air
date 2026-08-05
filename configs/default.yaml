@@ -1,9 +1,7 @@
 seed: 2026
-
 runtime:
-  cache_version: 2
+  cache_version: 3
   n_jobs: -1
-
 infrared:
   sample_fps: 5.0
   resize_width: 960
@@ -13,15 +11,13 @@ infrared:
   contrast_percentile: 99.75
   min_blob_area: 2
   max_blob_area_ratio: 0.0015
-  max_track_jump_ratio: 0.10
+  max_track_jump_ratio: 0.1
   max_missed_frames: 5
-
 radar:
   max_numeric_columns: 96
   max_vector_expansion: 16
   target_rate_hz: 10.0
   spectral_bins: 8
-
 alignment:
   enabled: true
   common_rate_hz: 5.0
@@ -29,13 +25,11 @@ alignment:
   estimate_drift: true
   drift_segments: 5
   max_drift_ppm: 5000
-
 window:
   length_seconds: 10.0
   stride_seconds: 5.0
-  min_coverage_ratio: 0.50
+  min_coverage_ratio: 0.5
   max_windows_per_record: 300
-
 model:
   estimator: extra_trees
   n_estimators: 600
@@ -45,10 +39,12 @@ model:
   probability_smoothing: 0.02
   branch_weights:
     fusion: 0.55
-    radar: 0.30
+    radar: 0.3
     infrared: 0.15
-
+  small_sample_probability_smoothing: 0.15
+  confidence_record_target_per_class: 5
 evaluation:
   n_splits: 5
   primary_metric: macro_f1
   min_valid_folds: 2
+  min_records_for_confidence_interval: 10
