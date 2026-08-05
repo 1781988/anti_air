@@ -233,8 +233,9 @@ class VideoReader:
             self.info = probed
             return
 
+        message = self.diagnostic_message()
         self.close()
-        raise RuntimeError(self.diagnostic_message())
+        raise RuntimeError(message)
 
     def diagnostic_message(self) -> str:
         ffmpeg = shutil.which("ffmpeg")
@@ -336,6 +337,7 @@ class VideoReader:
             raise RuntimeError("Failed to open FFmpeg stdout pipe")
         frame_bytes = output_width * output_height
         sampled = 0
+        stderr = b""
         try:
             while sampled < max_samples:
                 chunk = process.stdout.read(frame_bytes)
@@ -345,15 +347,17 @@ class VideoReader:
                 yield sampled / actual_fps, frame
                 sampled += 1
         finally:
-            if process.stdout:
-                process.stdout.close()
+            process.stdout.close()
             if process.poll() is None:
                 process.terminate()
             try:
-                _, stderr = process.communicate(timeout=5)
+                process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
-                _, stderr = process.communicate()
+                process.wait(timeout=5)
+            if process.stderr is not None:
+                stderr = process.stderr.read()
+                process.stderr.close()
             if sampled == 0 and process.returncode not in {0, None}:
                 detail = stderr.decode("utf-8", errors="replace")[-2000:]
                 raise RuntimeError(f"FFmpeg could not decode {self.path}:\n{detail}")
