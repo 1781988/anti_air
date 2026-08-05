@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 from scipy import signal
 
+from .video_io import VideoReader
+
 
 @dataclass
 class InfraredSequence:
@@ -51,37 +53,9 @@ class _TrackState:
         self.missed = 0
 
 
-def video_metadata(path: str | Path) -> dict[str, float]:
-    cap = cv2.VideoCapture(str(path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open infrared video: {path}")
-    try:
-        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-        frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-    finally:
-        cap.release()
-    if fps <= 0:
-        fps = 30.0
-    return {
-        "fps": fps,
-        "frames": float(frames),
-        "width": float(width),
-        "height": float(height),
-        "duration_seconds": float(frames / fps) if frames > 0 else 0.0,
-    }
-
-
-def _resize(gray: np.ndarray, resize_width: int) -> np.ndarray:
-    if resize_width <= 0 or gray.shape[1] <= resize_width:
-        return gray
-    scale = resize_width / gray.shape[1]
-    return cv2.resize(
-        gray,
-        (resize_width, max(1, int(round(gray.shape[0] * scale)))),
-        interpolation=cv2.INTER_AREA,
-    )
+def video_metadata(path: str | Path) -> dict[str, float | str | None]:
+    with VideoReader(path) as reader:
+        return reader.metadata()
 
 
 def _candidate_components(
@@ -160,38 +134,30 @@ def extract_infrared_sequence(
     max_track_jump_ratio: float = 0.10,
     max_missed_frames: int = 5,
 ) -> InfraredSequence:
-    input_path = Path(path)
-    cap = cv2.VideoCapture(str(input_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open infrared video: {input_path}")
-
-    source_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0) or 30.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    source_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-    source_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-    stride = max(1, int(round(source_fps / max(sample_fps, 1e-6))))
-    actual_sample_rate = source_fps / stride
-    clahe = cv2.createCLAHE(clipLimit=max(0.1, clahe_clip_limit), tileGridSize=(8, 8))
-
+    input_path = Path(path).expanduser().resolve()
     rows: list[dict[str, float]] = []
     activity: list[float] = []
     state = _TrackState()
     previous: np.ndarray | None = None
     previous_speed = 0.0
     previous_heading: float | None = None
-    sampled = 0
-    frame_index = 0
+    clahe = cv2.createCLAHE(clipLimit=max(0.1, clahe_clip_limit), tileGridSize=(8, 8))
 
-    try:
-        while sampled < max_samples:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            current_index = frame_index
-            frame_index += 1
-            if current_index % stride != 0:
-                continue
-            gray = _resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), resize_width)
+    with VideoReader(input_path) as reader:
+        if reader.info is None:
+            raise RuntimeError(f"Video reader did not provide metadata: {input_path}")
+        info = reader.info
+        source_fps = float(info.fps or 30.0)
+        total_frames = int(info.frames)
+        source_width = int(info.width)
+        source_height = int(info.height)
+        requested_rate = min(max(float(sample_fps), 1e-6), source_fps)
+
+        for current_time, gray in reader.iter_gray_frames(
+            sample_fps=requested_rate,
+            resize_width=resize_width,
+            max_samples=max_samples,
+        ):
             enhanced = clahe.apply(gray)
             smooth = cv2.GaussianBlur(enhanced, (0, 0), sigmaX=3.0)
             contrast = cv2.absdiff(enhanced, smooth).astype(np.float32)
@@ -234,49 +200,61 @@ def extract_infrared_sequence(
                 if old_x is not None and old_y is not None:
                     dx = selected["x"] - old_x
                     dy = selected["y"] - old_y
-                    speed = math.hypot(dx, dy) * actual_sample_rate / max(diagonal, 1e-6)
-                    acceleration = (speed - previous_speed) * actual_sample_rate
+                    speed = math.hypot(dx, dy) * requested_rate / max(diagonal, 1e-6)
+                    acceleration = (speed - previous_speed) * requested_rate
                     heading = math.atan2(dy, dx)
                     if previous_heading is not None:
                         delta = math.atan2(math.sin(heading - previous_heading), math.cos(heading - previous_heading))
-                        turn_rate = delta * actual_sample_rate
+                        turn_rate = delta * requested_rate
                     previous_speed = speed
                     previous_heading = heading
 
             motion_mean = float(np.mean(motion))
             motion_p99 = float(np.quantile(motion, 0.99))
             contrast_p99 = float(np.quantile(contrast, 0.99))
-            row = {
-                "time_s": current_index / source_fps,
-                "intensity_mean": float(np.mean(enhanced)),
-                "intensity_std": float(np.std(enhanced)),
-                "intensity_p99": float(np.quantile(enhanced, 0.99)),
-                "gradient_mean": float(np.mean(cv2.Laplacian(enhanced, cv2.CV_32F).__abs__())),
-                "motion_mean": motion_mean,
-                "motion_p99": motion_p99,
-                "contrast_p99": contrast_p99,
-                "candidate_count": float(len(candidates)),
-                "detected": detected,
-                "track_x": x_norm,
-                "track_y": y_norm,
-                "track_area_ratio": area_ratio,
-                "track_score": target_score,
-                "track_speed": speed,
-                "track_acceleration": acceleration,
-                "track_turn_rate": turn_rate,
-            }
-            rows.append(row)
-            activity.append(motion_p99 + 0.25 * contrast_p99 + (0.5 * target_score if math.isfinite(target_score) else 0.0))
+            rows.append(
+                {
+                    "time_s": float(current_time),
+                    "intensity_mean": float(np.mean(enhanced)),
+                    "intensity_std": float(np.std(enhanced)),
+                    "intensity_p99": float(np.quantile(enhanced, 0.99)),
+                    "gradient_mean": float(np.mean(np.abs(cv2.Laplacian(enhanced, cv2.CV_32F)))),
+                    "motion_mean": motion_mean,
+                    "motion_p99": motion_p99,
+                    "contrast_p99": contrast_p99,
+                    "candidate_count": float(len(candidates)),
+                    "detected": detected,
+                    "track_x": x_norm,
+                    "track_y": y_norm,
+                    "track_area_ratio": area_ratio,
+                    "track_score": target_score,
+                    "track_speed": speed,
+                    "track_acceleration": acceleration,
+                    "track_turn_rate": turn_rate,
+                }
+            )
+            activity.append(
+                motion_p99
+                + 0.25 * contrast_p99
+                + (0.5 * target_score if math.isfinite(target_score) else 0.0)
+            )
             previous = enhanced
-            sampled += 1
-    finally:
-        cap.release()
+
+        decoder_backend = info.backend
+        decoder_codec = info.codec
+        metadata_duration = float(info.duration_seconds)
 
     if not rows:
         raise ValueError(f"No readable frames in {input_path}")
     descriptor = pd.DataFrame(rows)
     times = descriptor.pop("time_s").to_numpy(dtype=float)
-    duration = float(total_frames / source_fps) if total_frames > 0 else float(times[-1] + 1.0 / actual_sample_rate)
+    if len(times) >= 2:
+        positive_steps = np.diff(times)
+        positive_steps = positive_steps[positive_steps > 0]
+        actual_sample_rate = 1.0 / float(np.median(positive_steps)) if len(positive_steps) else requested_rate
+    else:
+        actual_sample_rate = requested_rate
+    duration = metadata_duration or float(times[-1] + 1.0 / max(actual_sample_rate, 1e-9))
     detected_rate = float(descriptor["detected"].mean())
     return InfraredSequence(
         frame=descriptor,
@@ -291,6 +269,8 @@ def extract_infrared_sequence(
             "source_height": source_height,
             "sampled_frames": len(rows),
             "detected_rate": detected_rate,
+            "decoder_backend": decoder_backend,
+            "decoder_codec": decoder_codec,
             "quality": float(min(1.0, detected_rate * 1.5 + min(0.25, len(rows) / 1000.0))),
         },
     )
