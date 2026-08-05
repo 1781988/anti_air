@@ -1,14 +1,12 @@
-# 比赛提交检查清单
+# 提交检查清单
 
-- [ ] `python -m pytest -q` 全部通过；
-- [ ] 数据检查无错误；
-- [ ] 推理代码不读取文件名中的类别；
-- [ ] 同一批次窗口未跨训练/验证折；
-- [ ] `outputs/model/model.joblib` 存在；
-- [ ] `run.sh` 可对任意一对 MAT/MP4 输出 JSON；
-- [ ] `outputs/evaluation/metrics.json` 已生成；
+- [ ] `python -m pytest -q` 通过；
+- [ ] `outputs/inspection/dataset_inventory.json` 中 `error_count=0`；
+- [ ] `outputs/evaluation/metrics.json` 已检查评价状态、记录覆盖率和类别覆盖率；
+- [ ] 当 `eligible_for_primary_score=false` 时，报告没有把诊断指标描述为正式泛化性能；
+- [ ] `outputs/model/model.joblib`、`training_summary.json`、`MODEL_CARD.md` 均存在；
 - [ ] `outputs/report/test_report.md` 已生成；
-- [ ] `docs/algorithm_design.md` 已纳入提交包；
-- [ ] `outputs/submission/anti_air_submission.zip` 已在无网络环境解压测试；
-- [ ] 服务器重新创建虚拟环境后可安装全部依赖；
-- [ ] 正式评测接口、文件命名和输出字段与组委会最终说明一致。
+- [ ] 提交包包含 `evaluation/metrics.json`、`folds.json`、记录级预测和混淆矩阵；
+- [ ] `python scripts/validate_submission.py outputs/submission/anti_air_submission.zip` 通过；
+- [ ] 在全新虚拟环境中解压提交包并执行 `bash run.sh <radar.mat> <infrared.mp4> result.json`；
+- [ ] 推理程序不依赖文件名中的类别字段，不访问互联网，不需要人工交互。
