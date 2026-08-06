@@ -1,8 +1,8 @@
-# anti_air 2.0：雷达—红外多模态目标类型识别
+# anti_air 2.1：雷达—红外多模态目标类型识别
 
-本仓库面向“探测识别赛道—科目1：复杂环境下的目标类型智能识别”。任务是在低空、低速、复杂背景和鸟类/风筝等干扰条件下，结合雷达时序与红外视频，输出整段记录的目标类别和置信度。
+本仓库面向“探测识别赛道—科目1：复杂环境下的目标类型智能识别”。任务是在低空、低速、复杂背景以及鸟类、风筝等干扰条件下，综合利用雷达时序和红外视频，输出整段记录的目标类别及置信度。
 
-版本2.0不再采用“手工统计特征 + ExtraTrees”作为最终模型，而是使用可训练的PyTorch多模态网络：
+当前版本采用可训练的PyTorch多模态网络：
 
 ```text
 雷达MAT/table → 固定时长窗口 → 1D TCN雷达编码器 ───────┐
@@ -12,101 +12,136 @@
          雷达—红外活动曲线互相关对准
 ```
 
-## 1. 为什么旧版本训练很快
+## 1. 环境管理原则
 
-旧提交包中的模型实际是3个ExtraTrees分类器。上传结果显示只有：
+项目只使用Conda环境：
 
-- 3个独立记录；
-- 259个滑动窗口；
-- `class-A` 2个记录，`class-B` 1个记录；
-- 评价覆盖率只有2/3；
-- Accuracy为0.5，Macro-F1为0.3333。
+```text
+环境名称：anti-air
+Python版本：3.11
+环境定义：environment.yml
+```
 
-ExtraTrees在几百个样本上几秒完成是正常现象，不代表深度学习训练已充分进行。更关键的问题是：唯一的`class-B`记录不能同时出现在训练和独立验证中，因此旧报告中的两折验证只覆盖了部分记录/类别，不能作为正式比赛性能。
+不再创建或使用`.venv`。服务器`base`环境中的Python 3.13不会参与项目运行。
 
-新版本做了三项修正：
+下面三种方式均可运行项目：
 
-1. 使用雷达TCN、红外预训练MobileNet和时序Transformer进行真实梯度训练；
-2. 每个epoch打印耗时、损失和F1，不再把特征提取时间与模型训练混为一谈；
-3. 当独立记录不足时，评价状态明确写为`diagnostic_only`，不会把不完整验证标成正式有效结果。
+```bash
+# 推荐：完全不需要激活环境
+bash train.sh
 
-> 训练速度仍取决于数据量、GPU、配置和缓存。第一次运行需解码视频和构建缓存；相同数据再次运行会复用`.cache/`，明显加快是正常的。使用`--rebuild-cache`可强制重新处理。
+# 也可以手动激活
+conda activate anti-air
+python main.py all
 
-## 2. 开源框架调研与选型
+# 或直接使用conda run
+conda run -n anti-air python main.py all
+```
 
-### BasicIRSTD
-
-`XinyiYing/BasicIRSTD`是面向红外小目标检测的PyTorch工具箱，包含多种IRSTD模型、训练和指标实现。它与本赛题红外小目标部分最相关。但其标准训练依赖像素级目标掩码，而当前数据只提供整段类别，因此本仓库没有直接复制其训练器，而是保留“小目标检测器可替换接口”。后续获得目标掩码或预训练权重后，可将当前候选提取模块替换为BasicIRSTD模型。
-
-### MMDetection
-
-OpenMMLab的MMDetection适合目标框、实例分割和半监督检测。如果后续人工标注红外目标框/掩码，可用MMDetection训练检测器，再把轨迹裁剪送入本仓库的时序分类器。当前无目标框时直接套用会缺少监督信号。
-
-### MMAction2、PyTorchVideo与VideoMAE
-
-这些框架提供TSM、SlowFast、X3D、VideoSwin和VideoMAE等视频模型。它们适合替换本仓库的红外时序编码器，但完整框架依赖较重，而且通用动作预训练与“云背景中的几像素红外目标”存在明显域差异。本版本采用更轻的MobileNetV3 + 时序注意力，后续可在完整数据上比较VideoMAE/TSM。
-
-### OpenRadar
-
-OpenRadar提供距离、Doppler、角度、CFAR和跟踪等毫米波雷达DSP模块。如果组委会后续提供原始ADC或雷达立方体，可以接入OpenRadar。当前`.mat`是MATLAB table/时序字段，不是原始ADC，因此直接引入OpenRadar不会增加有效信息。
-
-### 当前选择
-
-本仓库采用自包含PyTorch工程，而不是整体依赖大型外部框架，原因是：
-
-- 兼容未知MATLAB table字段；
-- 同时处理视频级标签、雷达时序和异步对准；
-- 提交包更小，评测接口更简单；
-- 红外编码器、雷达编码器和融合层均可独立替换。
-
-## 3. 仓库结构
+## 2. 仓库结构
 
 ```text
 anti_air/
-├── anti_air/              # 数据、解码、对准、预处理、模型、训练、评价
+├── anti_air/              # 数据、解码、对准、模型、训练和评价
 ├── data/
-│   ├── README.md
-│   └── train/.gitkeep     # 将本地train文件夹覆盖/复制到这里
+│   └── train/.gitkeep     # 将本地train文件夹放到这里
 ├── tests/
-├── config.yaml            # 唯一配置文件，包含quick/cpu/competition三套配置
-├── main.py                # 唯一Python入口
-├── setup.sh               # 一键环境配置
+├── config.yaml            # quick/cpu/competition三套配置
+├── environment.yml        # Conda环境定义
+├── main.py                # Python统一入口
+├── setup.sh               # 一键创建或更新Conda环境
+├── train.sh               # 一键训练、评价和打包
 ├── run.sh                 # 比赛单对推理入口
-├── requirements.txt
+├── pyproject.toml
 └── README.md
 ```
 
-## 4. 服务器环境
+## 3. 从零配置服务器
 
-推荐：
+### 3.1 已安装Conda
 
-- Ubuntu 20.04/22.04/24.04；
-- Python 3.11或3.12；
-- CUDA GPU，显存建议8GB以上；
-- 纯CPU也可运行，但会自动使用较轻的`cpu`配置；
-- FFmpeg用于稳定读取MP4。
-
-安装系统依赖：
+确认：
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y git ffmpeg python3 python3-venv
+conda --version
 ```
 
-下载和配置：
+下载代码：
 
 ```bash
+cd ~/GMY
+rm -rf anti_air
 git clone https://github.com/1781988/anti_air.git
 cd anti_air
-bash setup.sh
-source .venv/bin/activate
 ```
 
-`setup.sh`会创建虚拟环境、安装依赖、编译检查并运行单元测试。
+创建环境：
 
-## 5. 配置数据集
+```bash
+bash setup.sh
+```
 
-把本地整个`train`文件夹复制到仓库的`data/`下：
+`setup.sh`会自动完成：
+
+```text
+创建或更新anti-air环境
+→ 固定Python 3.11
+→ 安装Conda版FFmpeg
+→ 安装项目和PyTorch依赖
+→ 编译检查
+→ 单元测试
+→ 输出Python、PyTorch、CUDA和FFmpeg状态
+```
+
+整个过程不依赖当前shell是否显示`(base)`，也不需要执行`conda deactivate`。
+
+### 3.2 未安装Conda
+
+安装Miniconda：
+
+```bash
+cd /tmp
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh -b -p "$HOME/miniconda3"
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda init bash
+```
+
+重新打开终端后：
+
+```bash
+cd ~/GMY/anti_air
+bash setup.sh
+```
+
+### 3.3 验证环境
+
+```bash
+conda run -n anti-air python --version
+conda run -n anti-air python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+conda run -n anti-air ffmpeg -version | head
+```
+
+应看到Python 3.11。
+
+如果服务器有NVIDIA GPU但`torch.cuda.is_available()`为`False`，按照PyTorch官方安装选择器取得适配该服务器的安装命令，并在`anti-air`环境中执行。也可设置官方轮子索引后重新运行安装脚本：
+
+```bash
+TORCH_INDEX_URL='<PyTorch官方选择器给出的index-url>' bash setup.sh
+```
+
+不要自行猜测CUDA轮子版本。
+
+### 3.4 环境损坏时重建
+
+```bash
+conda env remove -n anti-air -y
+bash setup.sh
+```
+
+## 4. 配置数据集
+
+把本地完整的`train`文件夹复制到仓库的`data/`下：
 
 ```text
 anti_air/
@@ -116,121 +151,172 @@ anti_air/
         ├── ir_339_class-B_16：18.mp4
         ├── radar_357_class-A_*.mat
         ├── ir_357_class-A_*.mp4
-        └── ...
+        ├── radar_897_class-A_*.mat
+        └── ir_897_class-A_*.mp4
 ```
 
-文件必须直接位于`data/train/`第一层。程序不会递归猜路径。
+文件必须直接位于`data/train/`第一层。
 
-检查文件：
+服务器已有数据时：
+
+```bash
+rm -rf data/train
+cp -a /你的数据路径/train data/train
+```
+
+检查：
 
 ```bash
 find data/train -maxdepth 1 -type f \( -name '*.mat' -o -name '*.mp4' \) -printf '%f\n' | sort
 ```
 
-## 6. 最简完整运行方式
+## 5. 最简运行方法
 
-正式运行只需要一条命令：
+### 5.1 快速联调
 
 ```bash
-python main.py all
+bash train.sh quick
 ```
 
-该命令自动完成：
+用于验证：
 
 ```text
-数据检查 → 视频/雷达预处理 → 异步对准 → 窗口缓存
-→ 独立批次交叉验证 → 全量最终训练 → 训练集诊断预测
-→ result.json → submission.zip
+数据读取
+视频解码
+雷达MAT/table解析
+跨模态对准
+模型前向和反向传播
+评价与提交包生成
 ```
 
-配置选择规则：
+`quick`只用于检查流程，不作为正式比赛性能。
 
-- 有CUDA：自动使用`competition`；
-- 无CUDA：自动使用`cpu`；
-- 首次只想验证环境：
+### 5.2 正式训练
+
+自动选择GPU或CPU配置：
 
 ```bash
-python main.py all --profile quick
+bash train.sh
 ```
 
-强制重新解码并重建缓存：
+明确使用GPU比赛配置：
 
 ```bash
-python main.py all --rebuild-cache
+bash train.sh competition
 ```
 
-数据不在默认位置时：
+纯CPU：
 
 ```bash
-python main.py all --data /absolute/path/to/train
+bash train.sh cpu
+```
+
+第一次运行会自动重建缓存。数据或预处理配置发生变化后，强制重建：
+
+```bash
+bash train.sh competition --rebuild-cache
+```
+
+### 5.3 不使用包装脚本
+
+等价命令：
+
+```bash
+conda run --no-capture-output -n anti-air \
+  python main.py all --profile competition --rebuild-cache
+```
+
+## 6. 完整流程
+
+`bash train.sh`会自动执行：
+
+```text
+数据检查
+→ 雷达MAT/table读取
+→ 红外视频解码和小目标轨迹裁剪
+→ 雷达—红外时间对准
+→ 窗口缓存
+→ 独立批次无泄漏评价
+→ 全量最终训练
+→ 结果汇总
+→ 比赛提交ZIP生成
+```
+
+相同数据再次运行会复用`.cache/anti_air/`，因此第二次明显更快是正常的。删除缓存：
+
+```bash
+conda run -n anti-air python main.py clean-cache
 ```
 
 ## 7. 输出文件
 
-为了减少文件数量，正常运行只在`runs/latest/`保留3个文件：
+正常运行只保留三个主要文件：
 
 ```text
 runs/latest/
-├── model.pt        # 最终多模态模型、类别、雷达字段schema和完整配置
-├── result.json     # 数据检查、训练历史、评价指标、混淆矩阵、预测和环境信息
-└── submission.zip  # 比赛交付压缩包
+├── model.pt
+├── result.json
+└── submission.zip
 ```
 
-中间张量缓存在`.cache/anti_air/`，不属于比赛输出。删除缓存：
+- `model.pt`：最终模型、类别映射、雷达字段Schema和配置；
+- `result.json`：数据检查、训练历史、评价指标、混淆矩阵、环境和预测；
+- `submission.zip`：比赛交付压缩包。
+
+## 8. 查看性能
 
 ```bash
-python main.py clean-cache
-```
-
-## 8. 分析结果
-
-查看概要：
-
-```bash
-python - <<'PY'
+conda run -n anti-air python - <<'PY'
 import json
-r = json.load(open('runs/latest/result.json', encoding='utf-8'))
-print('profile:', r['profile'])
-print('records:', r['data']['records'])
-print('classes:', r['data']['class_record_counts'])
-print('evaluation status:', r['evaluation']['status'])
-print('coverage:', r['evaluation'].get('coverage'))
-print('metrics:', r['evaluation'].get('metrics'))
-print('training seconds:', r['final_training']['elapsed_seconds'])
+
+with open('runs/latest/result.json', encoding='utf-8') as f:
+    result = json.load(f)
+
+print('profile:', result['profile'])
+print('records:', result['data']['records'])
+print('classes:', result['data']['class_record_counts'])
+print('evaluation status:', result['evaluation']['status'])
+print('coverage:', result['evaluation'].get('coverage'))
+print('metrics:', result['evaluation'].get('metrics'))
+print('training seconds:', result['final_training']['elapsed_seconds'])
+print('epochs:', result['final_training']['epochs_completed'])
 PY
 ```
 
 评价状态：
 
-- `valid`：每个类别至少有2个独立记录，评价覆盖全部记录和类别；
-- `diagnostic_only`：只能形成部分无泄漏折，指标只用于排查；
+- `valid`：各类别具有足够独立批次，评价覆盖完整；
+- `diagnostic_only`：只能形成部分合法无泄漏验证折；
 - `insufficient_independent_records`：无法形成合法验证折。
 
-必须优先看记录级`macro_f1`、`balanced_accuracy`、`coverage`和混淆矩阵，不能用训练集回代结果作为比赛性能。
+当前样例只有3个独立批次，其中`class-B`只有一个批次，因此指标通常只能作为工程诊断，不能代表正式泛化性能。
 
 ## 9. 单对推理
 
-仓库环境下：
+不需要激活环境：
 
 ```bash
-python main.py infer \
-  --radar 'radar_test.mat' \
-  --ir 'ir_test.mp4' \
+ANTI_AIR_MODEL=runs/latest/model.pt \
+bash run.sh \
+  '/测试数据/radar_test.mat' \
+  '/测试数据/ir_test.mp4' \
+  prediction.json
+```
+
+手动运行：
+
+```bash
+conda run --no-capture-output -n anti-air \
+  python main.py infer \
+  --radar '/测试数据/radar_test.mat' \
+  --ir '/测试数据/ir_test.mp4' \
   --model runs/latest/model.pt \
   --output prediction.json
 ```
 
-比赛提交包中：
-
-```bash
-bash run.sh radar_test.mat ir_test.mp4 result.json
-```
-
-输出包括类别、置信度、各类别概率、窗口数、时间对准结果以及雷达/红外门控权重。
-
 ## 10. 比赛提交包
 
-`python main.py all`会自动生成：
+完整训练后自动生成：
 
 ```text
 runs/latest/submission.zip
@@ -238,30 +324,67 @@ runs/latest/submission.zip
 
 压缩包包含：
 
-- `model.pt`：完整模型；
-- `result.json`：测试/评价报告；
-- 算法源代码；
-- 配置文件；
-- 环境依赖；
-- `run.sh`统一推理入口；
-- README与安装脚本。
+```text
+model.pt
+result.json
+算法源代码
+config.yaml
+environment.yml
+pyproject.toml
+setup.sh
+run.sh
+README.md
+单元测试
+```
 
-独立验证提交包：
+独立验证：
 
 ```bash
+rm -rf /tmp/anti_air_submit
 mkdir -p /tmp/anti_air_submit
 cd /tmp/anti_air_submit
-unzip /path/to/anti_air/runs/latest/submission.zip
+unzip ~/GMY/anti_air/runs/latest/submission.zip
 cd anti_air_submission
+
 bash setup.sh
-source .venv/bin/activate
-bash run.sh /path/radar_test.mat /path/ir_test.mp4 result.json
+bash run.sh \
+  '/测试数据/radar_test.mat' \
+  '/测试数据/ir_test.mp4' \
+  result.json
 cat result.json
 ```
 
-## 11. 重要限制
+## 11. 常见环境问题
 
-1. 当前样例只有3个独立记录，任何深度网络都可能过拟合；增加滑动窗口不能等价于增加独立样本。
-2. 文件名中的`class-*`只作为训练标签，不进入模型输入。
-3. 现有材料没有给出组委会最终评分公式和精确输出协议；本仓库使用记录级Macro-F1、Balanced Accuracy等标准指标，并提供通用JSON推理结果。正式接口发布后只需调整输出适配层。
-4. 首次运行若下载MobileNet预训练权重失败，会自动使用随机初始化并在终端警告；比赛提交模型本身不需要联网。
+### 当前终端一直显示`(base)`
+
+不影响运行。包装脚本始终调用：
+
+```text
+conda run -n anti-air ...
+```
+
+因此不会使用`base`中的Python 3.13。
+
+### `.venv/bin/activate`不存在
+
+正常。新版不再创建`.venv`，不要再执行：
+
+```bash
+source .venv/bin/activate
+```
+
+### 查看项目实际使用的Python
+
+```bash
+conda run -n anti-air python -c "import sys; print(sys.executable); print(sys.version)"
+```
+
+### 更新代码后同步环境
+
+```bash
+git pull --ff-only origin main
+bash setup.sh
+```
+
+`setup.sh`会更新已有环境，而不是重复创建。
