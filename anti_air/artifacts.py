@@ -31,6 +31,7 @@ def environment_info() -> dict[str, Any]:
         "cuda_available": torch.cuda.is_available(),
         "cuda_device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "numpy": np.__version__,
+        "conda_environment": os.environ.get("CONDA_DEFAULT_ENV"),
         "pid": os.getpid(),
     }
 
@@ -66,10 +67,12 @@ def create_submission(
         "anti_air",
         "main.py",
         "config.yaml",
+        "environment.yml",
         "requirements.txt",
         "pyproject.toml",
         "README.md",
         "run.sh",
+        "train.sh",
         "setup.sh",
         "tests",
     ]
@@ -91,9 +94,10 @@ def create_submission(
         shutil.copy2(model_path, staging / "model.pt")
         shutil.copy2(result_path, staging / "result.json")
         (staging / "SUBMISSION_README.txt").write_text(
-            "Install: bash setup.sh\n"
+            "Environment: bash setup.sh\n"
             "Infer: bash run.sh <radar.mat> <infrared.mp4> [result.json]\n"
-            "The model is fully offline after dependencies are installed.\n",
+            "The project uses the Conda environment named anti-air; no .venv is used.\n"
+            "The trained model runs offline after the environment is installed.\n",
             encoding="utf-8",
         )
         with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
