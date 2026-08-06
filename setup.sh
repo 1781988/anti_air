@@ -1,37 +1,76 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-ENV_DIR="${ENV_DIR:-.venv}"
+ENV_NAME="${ANTI_AIR_ENV:-anti-air}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
 
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-  echo "Python was not found. Install Python 3.11 or 3.12, or set PYTHON_BIN=/path/to/python." >&2
-  exit 1
-fi
-PYTHON_VERSION="$($PYTHON_BIN -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-case "$PYTHON_VERSION" in
-  3.11|3.12) ;;
-  *)
-    echo "Python 3.11 or 3.12 is required; detected $PYTHON_VERSION." >&2
-    exit 1
-    ;;
-esac
-if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
-  echo "FFmpeg is required for robust MP4 decoding." >&2
-  echo "Ubuntu/Debian: sudo apt-get update && sudo apt-get install -y ffmpeg" >&2
+if ! command -v conda >/dev/null 2>&1; then
+  cat >&2 <<'EOF'
+Conda was not found.
+Install Miniconda first, reopen the shell, and rerun: bash setup.sh
+Official installer: https://docs.conda.io/projects/miniconda/en/latest/
+EOF
   exit 1
 fi
 
-"$PYTHON_BIN" -m venv "$ENV_DIR"
-source "$ENV_DIR/bin/activate"
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -e ".[dev]"
-python -m compileall -q anti_air main.py
-if [[ -d tests ]]; then
+# Make conda activation available in non-interactive shells when users choose to
+# activate manually. The setup itself uses `conda run`, so base activation state
+# and the base Python version do not affect this project.
+CONDA_BASE="$(conda info --base)"
+# shellcheck disable=SC1091
+source "$CONDA_BASE/etc/profile.d/conda.sh"
+
+if conda run -n "$ENV_NAME" python -V >/dev/null 2>&1; then
+  echo "Updating existing Conda environment: $ENV_NAME"
+  conda env update -n "$ENV_NAME" -f environment.yml --prune
+else
+  echo "Creating Conda environment: $ENV_NAME"
+  conda env create -n "$ENV_NAME" -f environment.yml
+fi
+
+conda run --no-capture-output -n "$ENV_NAME" \
+  python -m pip install --upgrade pip setuptools wheel
+
+# Optional override for a CUDA-specific PyTorch wheel index. Leave unset for the
+# standard stable PyPI build. Example usage is documented in README.md.
+if [[ -n "${TORCH_INDEX_URL:-}" ]]; then
+  conda run --no-capture-output -n "$ENV_NAME" \
+    python -m pip install --upgrade torch torchvision --index-url "$TORCH_INDEX_URL"
+fi
+
+conda run --no-capture-output -n "$ENV_NAME" \
+  python -m pip install -e ".[dev]"
+
+conda run --no-capture-output -n "$ENV_NAME" \
+  python -m compileall -q anti_air main.py
+conda run --no-capture-output -n "$ENV_NAME" \
   python -m pytest
-fi
 
-echo
-echo "Environment ready."
-echo "Activate: source $ENV_DIR/bin/activate"
-echo "Run all: python main.py all"
+conda run --no-capture-output -n "$ENV_NAME" python - <<'PY'
+import shutil
+import sys
+import torch
+
+print("\nEnvironment verification")
+print("Python:", sys.version.split()[0])
+print("PyTorch:", torch.__version__)
+print("CUDA available:", torch.cuda.is_available())
+print("GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
+print("FFmpeg:", shutil.which("ffmpeg"))
+PY
+
+cat <<EOF
+
+Environment ready: $ENV_NAME
+No .venv is used.
+No activation is required for the wrapper scripts.
+
+Next steps:
+  1. Copy the competition train folder to: $ROOT_DIR/data/train
+  2. Quick check:    bash train.sh quick
+  3. Full pipeline:  bash train.sh
+
+Optional manual activation:
+  conda activate $ENV_NAME
+EOF
