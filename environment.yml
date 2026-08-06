@@ -1,0 +1,9 @@
+name: anti-air
+channels:
+  - conda-forge
+channel_priority: strict
+dependencies:
+  - python=3.11
+  - pip>=24
+  - ffmpeg>=6
+  - git
